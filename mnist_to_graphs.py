@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt 
 from scipy.spatial import KDTree
 
-R_LINK = 2.5 #1.5
+Graph = jraph.GraphsTuple
 
 def image_to_point_cloud(
   img, 
@@ -24,8 +24,8 @@ def image_to_point_cloud(
     pixel_points = []
 
     # cartesian coordinates of pixel
-    x = i #/ Npix * cloud_size
-    y = j #/ Npix * cloud_size
+    x = i / cloud_size # Scale by size of image..,?
+    y = j / cloud_size 
     
     # perturb position of point so img doesn't look gridded
     point = np.array([x, y]) 
@@ -51,11 +51,12 @@ def image_to_point_cloud(
         # make the (x,y) points for each pixel
         points.append(pixel_to_coords(img, i, j))
         # copy the pixel value accordingly
-        density.extend([img[i,j]] * (Nextra + 1))
+        density.extend([img[i, j]] * (Nextra + 1))
 
   density = np.asarray(density)
   points = np.asarray(points).reshape(-1, 2)
-  points = np.matmul(points, rotation)
+  # Images natively rotated differently 
+  points = np.matmul(points, rotation) 
 
   if plot and 0:
     plt.close()
@@ -89,14 +90,14 @@ def plot_graph(ax, points, density, r_link):
   ax.axis("off")
 
 
-def make_graph_from_cloud(cloud, r_link=R_LINK, plot=True):
-  points, density, label = cloud
+def make_graph_from_cloud_just_points(cloud, r_link):
+  points, label = cloud
   # Build the edge indices:
   # Get neighbouring points within linking distance
   edge_index = KDTree(points).query_pairs(
     r=r_link, output_type="ndarray")
   
-  # for jraph graphs tuple
+  # for jraph graphs tuple (undirected graph)
   reverse_pairs = np.zeros((edge_index.shape[0], 2))
   for i, pair in enumerate(edge_index):
     reverse_pairs[i] = pair[::-1]
@@ -108,9 +109,6 @@ def make_graph_from_cloud(cloud, r_link=R_LINK, plot=True):
   # get distance as an edge feature for graphs
   delta_distance = points[row] - points[col]
 
-  # node features are the pixel densities
-  nodes = density #jnp.atleast2d()
-
   # edges features are euclidean distances 
   edges = delta_distance 
 
@@ -120,40 +118,31 @@ def make_graph_from_cloud(cloud, r_link=R_LINK, plot=True):
   # Distance
   dist = np.linalg.norm(delta_distance, axis=1)
   # Centroid of galaxy catalogue
-  centroid = np.mean(points, axis=0)
+  centroid = points.mean(axis=0)
   # Unit vectors of node, neighbor and difference vector
-  unitrow = (points[row] - centroid) / np.linalg.norm((points[row] - centroid), axis=1).reshape(-1,1)
-  unitcol = (points[col] - centroid) / np.linalg.norm((points[col] - centroid), axis=1).reshape(-1,1)
+  unitrow = (points[row] - centroid) 
+  unitrow /= np.linalg.norm((points[row] - centroid), axis=1).reshape(-1, 1)
+  unitcol = (points[col] - centroid) 
+  unitcol /= np.linalg.norm((points[col] - centroid), axis=1).reshape(-1, 1)
   unitdiff = delta_distance / (dist.reshape(-1,1) + 1e-8)
   # Dot products between unit vectors
-  cos1 = np.array([np.dot(unitrow[i,:].T, unitcol[i,:]) for i in range(num_pairs)])
-  cos2 = np.array([np.dot(unitrow[i,:].T, unitdiff[i,:]) for i in range(num_pairs)])
+  cos1 = np.array([
+    np.dot(unitrow[i,:].T, unitcol[i,:]) 
+    for i in range(num_pairs)])
+  cos2 = np.array([
+    np.dot(unitrow[i,:].T, unitdiff[i,:]) 
+    for i in range(num_pairs)])
   # Normalize distance by linking radius
   dist /= r_link
 
-#   if plot:
-#     plt.figure(figsize=(3., 3.), dpi=200)
-
-#     plt.scatter(*points.T, s=4., c=density, zorder=15, cmap="PiYG_r")
-#     kd_tree = KDTree(points)
-
-#     pairs = kd_tree.query_pairs(r=r_link)
-
-#     for (i, j) in pairs:
-#         # Plot a line between each point according to 
-#         # the KDTree queried pairs of points
-#         plt.plot(
-#             [points[i, 0], points[j, 0]],
-#             [points[i, 1], points[j, 1]], 
-#             "-k", linewidth=0.25, zorder=8)
-
-    # plt.axis("off")
-    # plt.show()
+  nodes = jnp.ones((len(points),))
 
   # jraph graph stuff 
   # Concatenate to get all edge attributes
-  edge_attr = np.concatenate(
-    [dist.reshape(-1,1), cos1.reshape(-1,1), cos2.reshape(-1,1)], axis=1)
+  edge_attr = np.concatenate([
+    dist.reshape(-1,1), 
+    cos1.reshape(-1,1), 
+    cos2.reshape(-1,1)], axis=1)
   n_node = jnp.array([nodes.shape[0]])
   n_edge = jnp.array([edges.shape[0]])
   global_context = jnp.array([label])
@@ -171,6 +160,78 @@ def make_graph_from_cloud(cloud, r_link=R_LINK, plot=True):
   return graph
 
 
+def make_graph_from_cloud(cloud, r_link, plot=True):
+  points, density, label = cloud
+  # Build the edge indices:
+  # Get neighbouring points within linking distance
+  edge_index = KDTree(points).query_pairs(
+    r=r_link, output_type="ndarray")
+  
+  # for jraph graphs tuple (undirected graph)
+  reverse_pairs = np.zeros((edge_index.shape[0], 2))
+  for i, pair in enumerate(edge_index):
+    reverse_pairs[i] = pair[::-1]
+
+  # terminology for jraph
+  senders, receivers = edge_index.astype(int).T
+
+  row, col = edge_index.T
+  # get distance as an edge feature for graphs
+  delta_distance = points[row] - points[col]
+
+  # node features are the pixel densities
+  nodes = density 
+
+  # edges features are euclidean distances 
+  edges = delta_distance 
+
+  # Get translation / rotation invariant edge attributes
+  num_pairs = edge_index.shape[0]
+  # Get translational and rotational invariant features
+  # Distance
+  dist = np.linalg.norm(delta_distance, axis=1)
+  # Centroid of galaxy catalogue
+  centroid = points.mean(axis=0)
+  # Unit vectors of node, neighbor and difference vector
+  unitrow = (points[row] - centroid) 
+  unitrow /= np.linalg.norm((points[row] - centroid), axis=1).reshape(-1,1)
+  unitcol = (points[col] - centroid) 
+  unitcol /= np.linalg.norm((points[col] - centroid), axis=1).reshape(-1,1)
+  unitdiff = delta_distance / (dist.reshape(-1,1) + 1e-8)
+  # Dot products between unit vectors
+  cos1 = np.array([
+    np.dot(unitrow[i,:].T, unitcol[i,:]) 
+    for i in range(num_pairs)])
+  cos2 = np.array([
+    np.dot(unitrow[i,:].T, unitdiff[i,:]) 
+    for i in range(num_pairs)])
+  # Normalize distance by linking radius
+  dist /= r_link
+
+  # jraph graph stuff 
+  # Concatenate to get all edge attributes
+  edge_attr = np.concatenate([
+    dist.reshape(-1,1), 
+    cos1.reshape(-1,1), 
+    cos2.reshape(-1,1)], axis=1)
+  n_node = jnp.array([nodes.shape[0]])
+  n_edge = jnp.array([edges.shape[0]])
+  global_context = jnp.array([label])
+
+  edge_attr = jnp.nan_to_num(edge_attr, nan=0.0)
+
+  graph = jraph.GraphsTuple(
+    nodes=nodes.reshape(nodes.shape[0], 1),
+    n_node=n_node,
+    globals=global_context,
+    edges=edge_attr, # rotation/translation invariant edge features (else 'edges')
+    senders=senders,
+    receivers=receivers,
+    n_edge=n_edge)
+  return graph
+
+
+
 def _nearest_bigger_power_of_two(x: int) -> int:
   """Computes the nearest power of two greater than x for padding."""
   y = 2
@@ -180,7 +241,7 @@ def _nearest_bigger_power_of_two(x: int) -> int:
 
 
 def pad_graph_to_nearest_power_of_two(
-    graphs_tuple: jraph.GraphsTuple) -> jraph.GraphsTuple:
+  graphs_tuple: jraph.GraphsTuple) -> jraph.GraphsTuple:
   """
       Pads a batched `GraphsTuple` to the nearest power of two.
       For example, if a `GraphsTuple` has 7 nodes, 5 edges and 3 graphs, this method
@@ -213,8 +274,8 @@ def pad_graph_to_nearest_power_of_two(
 
 
 def pad_graph_to_value(
-    graphs_tuple: jraph.GraphsTuple,
-    value: int) -> jraph.GraphsTuple:
+  graphs_tuple: Graph, value: int) -> Graph:
+  """ Pad graph to a fixed value instead of various powers of 2. """
   # Add 1 since we need at least one padding node for pad_with_graphs.
   pad_nodes_to = value + 1
   pad_edges_to = value
@@ -226,16 +287,21 @@ def pad_graph_to_value(
     pad_graphs_to)
   return padded_graphs
 
+def get_mnist_graphs(
+  images, 
+  labels, 
+  r_link, 
+  n_graphs=100, 
+  plot=False):
 
-def get_mnist_graphs(images, labels, n_graphs=100, plot=False):
-
+  # Plotting all graphs together
   if plot:
-    n_plot = int(np.sqrt(n_graphs))
+    n_plot = min(int(np.sqrt(n_graphs)), 10)
     fig, axs = plt.subplots(
-      n_plot, n_plot, figsize=(6.,6.), dpi=200)
+      n_plot, n_plot, figsize=(4., 4.), dpi=200)
 
   graphs = []
-  for i, ax in zip(range(n_graphs), axs.ravel()):
+  for i in range(n_graphs):
     image, label = images[i], labels[i]
     image = image.squeeze()
     # Make a point cloud from the mnist image
@@ -243,11 +309,11 @@ def get_mnist_graphs(images, labels, n_graphs=100, plot=False):
       image, plot=plot, subsample_factor=2)
     # Make a graph from the point cloud
     graph = make_graph_from_cloud(
-      [points, density, label], plot=plot)
+      [points, density, label], plot=plot, r_link=r_link)
     graphs.append(graph)
 
-    if plot:
-      plot_graph(ax, points, density, R_LINK)
+    if plot and i < int(n_plot ** 2):
+      plot_graph(axs.ravel()[i], points, density, r_link=r_link)
 
   if plot:
     plt.tight_layout()
@@ -257,6 +323,62 @@ def get_mnist_graphs(images, labels, n_graphs=100, plot=False):
   dataset = [
     {"input_graph" : graph, "target" : label} 
     for graph, label in zip(graphs, labels)]
+  return dataset
+
+def rotation_matrix(phi_deg):
+  phi = np.radians(phi_deg)
+  c, s = np.cos(phi), np.sin(phi)
+  R = np.array(((c, -s), (s, c)))
+  return R
+
+def get_rotated_mnist_graphs(
+  images, 
+  labels, 
+  r_link,  
+  n_graphs=4, 
+  plot=True):
+  #angles = [90., 180., 270., 360.]
+  angles = [0, 1, 2, 3] # multiples of 90 degrees
+
+  graphs = []
+  for i in range(n_graphs):
+    image, label = images[i], labels[i]
+    image = image.squeeze()
+    # Plotting all graphs together
+    if plot:
+      n_plot = int(np.sqrt(n_graphs * len(angles)))
+      fig, axs = plt.subplots(
+        n_plot, n_plot, figsize=(6., 6.), dpi=200)
+    for phi, ax in zip(angles, axs.ravel()):
+    #   image = np.matmul(
+    #     rotation_matrix(phi), image)
+
+      # Not quite the same as applying a rotation matrix to the nodes...
+      image = np.rot90(image, k=phi)
+      # Make a point cloud from the mnist image
+      points, density = image_to_point_cloud(
+        image, 
+        plot=plot, 
+        subsample_factor=2)
+      # Make a graph from the point cloud
+      graph = make_graph_from_cloud(
+        [points, density, label], 
+        plot=plot, 
+        r_link=r_link)
+      graphs.append(graph)
+
+      if plot:
+        plot_graph(ax, points, density, r_link=r_link)
+
+  if plot:
+    plt.tight_layout()
+    plt.show()
+
+  # return graphs, labels
+  dataset = [
+    {"input_graph" : graph, "target" : label} 
+    for graph, label in zip(
+      graphs, [label for _ in angles])]
   return dataset
 
 
